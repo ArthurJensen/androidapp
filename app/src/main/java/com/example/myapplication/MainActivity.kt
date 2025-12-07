@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -29,7 +30,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // This allows us to get information about system bars like status and navigation bars
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         setContent {
@@ -38,9 +38,6 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    // Get status bar height and pass it to our screen
-                    // FIX: This requires the WindowInsets class to be available.
-                    // The 'asPaddingValues()' and 'calculateTopPadding()' are part of Compose's layout system.
                     val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
                     OverlayControllerScreen(statusBarHeight = statusBarHeight.value.toInt())
                 }
@@ -54,6 +51,9 @@ fun OverlayControllerScreen(statusBarHeight: Int) {
     val context = LocalContext.current
     var hasPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
 
+    // --- FIX 1: State to hold the text from the TextField ---
+    var overlayText by remember { mutableStateOf("Overlay") }
+
     val overlayPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
@@ -64,14 +64,27 @@ fun OverlayControllerScreen(statusBarHeight: Int) {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp), // Add some padding
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // --- FIX 2: Add a TextField for user input ---
+        OutlinedTextField(
+            value = overlayText,
+            onValueChange = { overlayText = it },
+            label = { Text("Overlay Text") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         Button(onClick = {
             if (hasPermission) {
-                // Pass the status bar height to the service
-                startOverlayService(context, statusBarHeight)
+                // --- FIX 3: Pass the text from our state to the service ---
+                startOverlayService(context, statusBarHeight, overlayText)
             } else {
                 Toast.makeText(context, "Please grant overlay permission.", Toast.LENGTH_LONG).show()
                 val intent = Intent(
@@ -81,7 +94,7 @@ fun OverlayControllerScreen(statusBarHeight: Int) {
                 overlayPermissionLauncher.launch(intent)
             }
         }) {
-            Text(text = "Start Overlay Service")
+            Text(text = "Start / Update Overlay")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -94,11 +107,12 @@ fun OverlayControllerScreen(statusBarHeight: Int) {
     }
 }
 
-// Updated to accept the top margin
-private fun startOverlayService(context: Context, topMargin: Int) {
+// Updated to accept the overlay text
+private fun startOverlayService(context: Context, topMargin: Int, text: String) {
     val intent = Intent(context, OverlayService::class.java).apply {
-        // Put the top margin value into the Intent so the service can read it
         putExtra("TOP_MARGIN", topMargin)
+        // Put the user's text into the Intent
+        putExtra("OVERLAY_TEXT", text)
     }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -111,4 +125,3 @@ private fun startOverlayService(context: Context, topMargin: Int) {
 private fun stopOverlayService(context: Context) {
     context.stopService(Intent(context, OverlayService::class.java))
 }
-

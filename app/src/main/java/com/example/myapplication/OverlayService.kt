@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 import android.app.Notification
+// FIX: Corrected the malformed import statement below
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -12,17 +13,18 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
-// FIX: Added missing imports for Lifecycle and SavedState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -36,12 +38,11 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 
     private lateinit var windowManager: WindowManager
     private var composeView: ComposeView? = null
+    private lateinit var params: WindowManager.LayoutParams
 
-    // Default values
-    private var topMargin: Int = 32
-    private var startMargin: Int = 32
+    // --- FIX 1: State to hold the overlay text ---
+    private val overlayTextState = mutableStateOf("Overlay")
 
-    // These properties require the Lifecycle and SavedStateRegistry classes
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
     override val lifecycle: Lifecycle get() = lifecycleRegistry
@@ -56,16 +57,21 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        topMargin = intent?.getIntExtra("TOP_MARGIN", 32) ?: 32
+        // --- FIX 2: Read text from Intent and update the state ---
+        val textFromIntent = intent?.getStringExtra("OVERLAY_TEXT")
+        if (textFromIntent != null) {
+            overlayTextState.value = textFromIntent
+        }
 
-        val channelId = "OverlayServiceChannel"
-        createNotificationChannel(channelId)
-        val notification = createNotification(channelId)
-        startForeground(1, notification)
-
+        // If the service is started for the first time
         if (composeView == null) {
+            val topMargin = intent?.getIntExtra("TOP_MARGIN", 32) ?: 32
+            val channelId = "OverlayServiceChannel"
+            createNotificationChannel(channelId)
+            val notification = createNotification(channelId)
+            startForeground(1, notification)
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-            showOverlay()
+            showOverlay(topMargin, 32)
         }
 
         return START_NOT_STICKY
@@ -78,24 +84,37 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         Toast.makeText(this, "Overlay Service Stopped", Toast.LENGTH_SHORT).show()
     }
 
-    private fun showOverlay() {
+    private fun showOverlay(topMargin: Int, startMargin: Int) {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-        val params = WindowManager.LayoutParams(
+        params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
             gravity = Gravity.TOP or Gravity.START
             x = startMargin
             y = topMargin
         }
 
         composeView = ComposeView(this).apply {
-            setContent { MyOverlayContent() }
-            // These lines require the specific helper functions to be imported
+            setContent {
+                // Pass the state and drag callback to the composable
+                MyOverlayContent(
+                    text = overlayTextState.value, // Pass the text
+                    onDrag = { dx, dy ->
+                        params.x += dx.toInt()
+                        params.y += dy.toInt()
+                        windowManager.updateViewLayout(this, params)
+                    }
+                )
+            }
             setViewTreeLifecycleOwner(this@OverlayService)
             setViewTreeSavedStateRegistryOwner(this@OverlayService)
         }
@@ -128,14 +147,24 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     }
 }
 
+// --- FIX 3: Update Composable to accept text ---
 @Composable
-fun MyOverlayContent() {
+fun MyOverlayContent(text: String, onDrag: (Float, Float) -> Unit) {
     Box(
         modifier = Modifier
-            .background(Color.Black.copy(alpha = 0.5f))
-            .padding(16.dp)
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    onDrag(dragAmount.x, dragAmount.y)
+                }
+            }
     ) {
-        Text(text = "This is a Compose Overlay!", color = Color.White, fontSize = 20.sp)
+        Box(
+            modifier = Modifier
+                .background(Color.Black.copy(alpha = 0.5f))
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Text(text = text, color = Color.White, fontSize = 20.sp)
+        }
     }
 }
-
