@@ -98,17 +98,26 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
-            gravity = Gravity.TOP or Gravity.START
-            x = startMargin
-            y = topMargin
+
+            // PIXEL 6 SPECIFIC ALIGNMENT:
+            // Center it horizontally at the top
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+
+            // x is now an offset from the CENTER. 0 means perfectly centered.
+            x = 0
+
+            // y is the distance from the very top of the physical screen.
+            // On a Pixel 6, the hole punch center is roughly at 48-60 pixels,
+            // but setting it to 0-10 usually looks best for a "ring" or "badge" effect.
+            y = 10
         }
 
         composeView = ComposeView(this).apply {
             setContent {
-                // Pass the state and drag callback to the composable
                 MyOverlayContent(
-                    text = overlayTextState.value, // Pass the text
+                    text = overlayTextState.value,
                     onDrag = { dx, dy ->
+                        // Update the layout params as the user drags
                         params.x += dx.toInt()
                         params.y += dy.toInt()
                         windowManager.updateViewLayout(this, params)
