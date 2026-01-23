@@ -1,179 +1,368 @@
 package com.example.myapplication
 
-import android.app.Notification
-// FIX: Corrected the malformed import statement below
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
+import android.accessibilityservice.AccessibilityService
+import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.drawable.Drawable
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Build
-import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.WindowManager
-import android.widget.Toast
+import android.view.accessibility.AccessibilityEvent
+import android.widget.ImageView
+import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.app.NotificationCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.*
+import androidx.savedstate.*
+import kotlinx.coroutines.delay
 
-class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
+class OverlayService : AccessibilityService(), LifecycleOwner, SavedStateRegistryOwner {
 
     private lateinit var windowManager: WindowManager
-    private var composeView: ComposeView? = null
     private lateinit var params: WindowManager.LayoutParams
+    private var composeView: ComposeView? = null
 
-    // --- FIX 1: State to hold the overlay text ---
-    private val overlayTextState = mutableStateOf("Overlay")
+    private lateinit var mediaSessionManager: MediaSessionManager
+    private var activeController: MediaController? = null
+    private var mediaCallback: MediaController.Callback? = null
+
+    private val albumArt = mutableStateOf<Bitmap?>(null)
+    private val appIcon = mutableStateOf<Drawable?>(null)
+    private val isMusicPlaying = mutableStateOf(false)
+    private val isExpanded = mutableStateOf(false)
+    private val isControlsVisible = mutableStateOf(false)
+
+    // Slider-controlled values
+    private val hPadding = mutableStateOf(14)
+    private val vPadding = mutableStateOf(4)
+    private val holeWidth = mutableStateOf(60)
+    private val pillHeight = mutableStateOf(36)
+    private val circleSize = mutableStateOf(36)
 
     private val lifecycleRegistry = LifecycleRegistry(this)
-    private val savedStateRegistryController = SavedStateRegistryController.create(this)
-    override val lifecycle: Lifecycle get() = lifecycleRegistry
-    override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
+    private val savedStateController = SavedStateRegistryController.create(this)
 
-    override fun onCreate() {
-        super.onCreate()
-        savedStateRegistryController.performRestore(null)
+    // Timer for controls dismissal
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val hideControlsRunnable = Runnable { isControlsVisible.value = false }
+
+    override val lifecycle: Lifecycle = lifecycleRegistry
+    override val savedStateRegistry = savedStateController.savedStateRegistry
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        savedStateController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-    }
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
 
-    override fun onBind(intent: Intent?): IBinder? = null
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
+
+        showOverlay()
+        attachMediaListener()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // --- FIX 2: Read text from Intent and update the state ---
-        val textFromIntent = intent?.getStringExtra("OVERLAY_TEXT")
-        if (textFromIntent != null) {
-            overlayTextState.value = textFromIntent
-        }
+        intent?.let {
+            hPadding.value = it.getIntExtra("PILL_H_PADDING", hPadding.value)
+            vPadding.value = it.getIntExtra("PILL_V_PADDING", vPadding.value)
+            holeWidth.value = it.getIntExtra("HOLE_WIDTH", holeWidth.value)
+            pillHeight.value = it.getIntExtra("PILL_HEIGHT", pillHeight.value)
+            circleSize.value = it.getIntExtra("CIRCLE_SIZE", circleSize.value)
 
-        // If the service is started for the first time
-        if (composeView == null) {
-            val topMargin = intent?.getIntExtra("TOP_MARGIN", 32) ?: 32
-            val channelId = "OverlayServiceChannel"
-            createNotificationChannel(channelId)
-            val notification = createNotification(channelId)
-            startForeground(1, notification)
-            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-            showOverlay(topMargin, 32)
+            if (::params.isInitialized) {
+                params.x = it.getIntExtra("X_OFFSET", params.x)
+                params.y = it.getIntExtra("Y_OFFSET", params.y)
+                try {
+                    windowManager.updateViewLayout(composeView, params)
+                } catch (_: Exception) {}
+            }
         }
-
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-        hideOverlay()
-        Toast.makeText(this, "Overlay Service Stopped", Toast.LENGTH_SHORT).show()
+    private fun attachMediaListener() {
+        val component = ComponentName(this, OverlayService::class.java)
+        val refresh = {
+            val controllers = mediaSessionManager.getActiveSessions(component)
+            val controller = controllers.find {
+                val s = it.playbackState?.state
+                s == PlaybackState.STATE_PLAYING || s == PlaybackState.STATE_BUFFERING
+            } ?: controllers.firstOrNull()
+
+            if (controller != null) bindController(controller) else clearMedia()
+        }
+        refresh()
+        mediaSessionManager.addOnActiveSessionsChangedListener({ refresh() }, component)
     }
 
-    private fun showOverlay(topMargin: Int, startMargin: Int) {
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+    private fun bindController(controller: MediaController) {
+        if (activeController == controller) return
+        mediaCallback?.let { activeController?.unregisterCallback(it) }
+        activeController = controller
+
+        val sync = {
+            val state = controller.playbackState?.state
+            isMusicPlaying.value = state == PlaybackState.STATE_PLAYING ||
+                    state == PlaybackState.STATE_BUFFERING
+
+            val meta = controller.metadata
+            albumArt.value = meta?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: meta?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+
+            try {
+                appIcon.value = packageManager.getApplicationIcon(controller.packageName)
+            } catch (_: Exception) {
+                appIcon.value = null
+            }
+        }
+
+        mediaCallback = object : MediaController.Callback() {
+            override fun onPlaybackStateChanged(state: PlaybackState?) = sync()
+            override fun onMetadataChanged(metadata: MediaMetadata?) = sync()
+            override fun onSessionDestroyed() = clearMedia()
+        }
+
+        controller.registerCallback(mediaCallback!!)
+        sync()
+    }
+
+    private fun clearMedia() {
+        mediaCallback?.let { activeController?.unregisterCallback(it) }
+        activeController = null
+        mediaCallback = null
+        albumArt.value = null
+        appIcon.value = null
+        isMusicPlaying.value = false
+        isControlsVisible.value = false
+        mainHandler.removeCallbacks(hideControlsRunnable)
+    }
+
+    private fun resetControlsTimer() {
+        mainHandler.removeCallbacks(hideControlsRunnable)
+        if (isControlsVisible.value) {
+            mainHandler.postDelayed(hideControlsRunnable, 1500) // 3.5 seconds
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showOverlay() {
+        val density = resources.displayMetrics.density
+        var longPressRunnable: Runnable? = null
+        var wasLongPress = false
 
         params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            (150 * density).toInt(),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
-
-            // PIXEL 6 SPECIFIC ALIGNMENT:
-            // Center it horizontally at the top
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-
-            // x is now an offset from the CENTER. 0 means perfectly centered.
-            x = 0
-
-            // y is the distance from the very top of the physical screen.
-            // On a Pixel 6, the hole punch center is roughly at 48-60 pixels,
-            // but setting it to 0-10 usually looks best for a "ring" or "badge" effect.
-            y = 10
-        }
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL }
 
         composeView = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@OverlayService)
+            setViewTreeSavedStateRegistryOwner(this@OverlayService)
+
+            setOnTouchListener { _, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        wasLongPress = false
+                        longPressRunnable = Runnable {
+                            if (isMusicPlaying.value || isExpanded.value) {
+                                isControlsVisible.value = true
+                                wasLongPress = true
+                                resetControlsTimer()
+                            }
+                        }
+                        mainHandler.postDelayed(longPressRunnable!!, 500)
+                        false
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                        if (!wasLongPress) {
+                            if (isControlsVisible.value) {
+                                isControlsVisible.value = false
+                                mainHandler.removeCallbacks(hideControlsRunnable)
+                            } else {
+                                isExpanded.value = !isExpanded.value
+                            }
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+                        false
+                    }
+                    else -> false
+                }
+            }
+
             setContent {
-                MyOverlayContent(
-                    text = overlayTextState.value,
-                    onDrag = { dx, dy ->
-                        // Update the layout params as the user drags
-                        params.x += dx.toInt()
-                        params.y += dy.toInt()
-                        windowManager.updateViewLayout(this, params)
+                DynamicHolePunchOverlay(
+                    expanded = isExpanded.value,
+                    musicPlaying = isMusicPlaying.value,
+                    art = albumArt.value,
+                    icon = appIcon.value,
+                    hPad = hPadding.value,
+                    vPad = vPadding.value,
+                    holeW = holeWidth.value,
+                    pillH = pillHeight.value,
+                    circleS = circleSize.value,
+                    showControls = isControlsVisible.value,
+                    onCollapse = { isExpanded.value = false },
+                    onPrev = {
+                        activeController?.transportControls?.skipToPrevious()
+                        resetControlsTimer()
+                    },
+                    onNext = {
+                        activeController?.transportControls?.skipToNext()
+                        resetControlsTimer()
                     }
                 )
             }
-            setViewTreeLifecycleOwner(this@OverlayService)
-            setViewTreeSavedStateRegistryOwner(this@OverlayService)
         }
 
         windowManager.addView(composeView, params)
     }
 
-    private fun hideOverlay() {
-        composeView?.let {
-            windowManager.removeView(it)
-            composeView = null
-        }
-    }
-
-    private fun createNotification(channelId: String): Notification {
-        return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Overlay Service Active")
-            .setContentText("The overlay is currently running.")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .build()
-    }
-
-    private fun createNotificationChannel(channelId: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                channelId, "Overlay Service Channel", NotificationManager.IMPORTANCE_DEFAULT
-            )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(serviceChannel)
-        }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onInterrupt() {}
+    override fun onDestroy() {
+        clearMedia()
+        mainHandler.removeCallbacks(hideControlsRunnable)
+        composeView?.let { windowManager.removeView(it) }
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        super.onDestroy()
     }
 }
 
-// --- FIX 3: Update Composable to accept text ---
 @Composable
-fun MyOverlayContent(text: String, onDrag: (Float, Float) -> Unit) {
-    Box(
-        modifier = Modifier
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    onDrag(dragAmount.x, dragAmount.y)
-                }
-            }
-    ) {
-        Box(
+fun DynamicHolePunchOverlay(
+    expanded: Boolean,
+    musicPlaying: Boolean,
+    art: Bitmap?,
+    icon: Drawable?,
+    hPad: Int,
+    vPad: Int,
+    holeW: Int,
+    pillH: Int,
+    circleS: Int,
+    showControls: Boolean,
+    onCollapse: () -> Unit,
+    onPrev: () -> Unit,
+    onNext: () -> Unit
+) {
+    LaunchedEffect(musicPlaying) {
+        if (!musicPlaying && expanded) {
+            delay(700)
+            onCollapse()
+        }
+    }
+
+    val totalPillWidth = (32 + 12 + holeW + 12 + 32 + (hPad * 2)).dp
+
+    val pillWidth by animateDpAsState(
+        targetValue = if (expanded || musicPlaying) totalPillWidth else circleS.dp,
+        animationSpec = tween(400), label = "width"
+    )
+
+    val height by animateDpAsState(
+        targetValue = if (expanded || musicPlaying) pillH.dp else circleS.dp,
+        animationSpec = tween(400), label = "height"
+    )
+
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Row(
             modifier = Modifier
-                .background(Color.Black.copy(alpha = 0.5f))
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .width(pillWidth)
+                .height(height)
+                .background(Color.Black, RoundedCornerShape(50))
+                .padding(horizontal = hPad.dp, vertical = vPad.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
-            Text(text = text, color = Color.White, fontSize = 20.sp)
+            if (expanded || musicPlaying) {
+                Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                    AnimatedContent(
+                        targetState = showControls,
+                        transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) },
+                        label = "LeftControlTransform"
+                    ) { controls ->
+                        if (controls) {
+                            IconButton(onClick = onPrev) {
+                                Text("⏮", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                            }
+                        } else {
+                            art?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize().clip(CircleShape),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(holeW.dp))
+                Spacer(Modifier.width(12.dp))
+
+                Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                    AnimatedContent(
+                        targetState = showControls,
+                        transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) },
+                        label = "RightControlTransform"
+                    ) { controls ->
+                        if (controls) {
+                            IconButton(onClick = onNext) {
+                                Text("⏭", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                            }
+                        } else {
+                            icon?.let {
+                                AndroidView(
+                                    factory = { context ->
+                                        ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                                    },
+                                    update = { v -> v.setImageDrawable(it) },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Box(Modifier.size(circleS.dp).background(Color.Black, CircleShape))
+            }
         }
     }
 }
